@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const axios = require('axios');
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -11,11 +12,10 @@ const JSONBIN_URL = `https://api.jsonbin.io/v3/b/${JSONBIN_BIN}`;
 // ── JSONBIN LOGGING ──
 async function readLogs() {
   try {
-    const res = await fetch(JSONBIN_URL + '/latest', {
+    const res = await axios.get(JSONBIN_URL + '/latest', {
       headers: { 'X-Master-Key': JSONBIN_KEY }
     });
-    const data = await res.json();
-    return data.record.logs || [];
+    return res.data.record.logs || [];
   } catch (e) {
     console.error('JSONbin read error:', e.message);
     return [];
@@ -28,14 +28,13 @@ async function writeLog(entry) {
     logs.push(entry);
     // Keep last 500 entries
     const trimmed = logs.slice(-500);
-    await fetch(JSONBIN_URL, {
-      method: 'PUT',
+    await axios.put(JSONBIN_URL, { logs: trimmed }, {
       headers: {
         'Content-Type': 'application/json',
         'X-Master-Key': JSONBIN_KEY
-      },
-      body: JSON.stringify({ logs: trimmed })
+      }
     });
+    console.log('[USAGE logged]', entry.firstWords);
   } catch (e) {
     console.error('JSONbin write error:', e.message);
   }
@@ -79,17 +78,14 @@ app.post('/chat', async (req, res) => {
   writeLog(buildEntry(req)).catch(() => {});
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
+    const response = await axios.post('https://api.anthropic.com/v1/messages', req.body, {
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': process.env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify(req.body)
+      }
     });
-    const data = await response.json();
-    res.json(data);
+    res.json(response.data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -4,52 +4,79 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── USAGE LOG (in memory, resets on restart) ──
-const usageLog = [];
+const JSONBIN_KEY = '$2a$10$PaM27r3QWoOQOdmZLDgl..pAgmHOkTpqHu8zwFozZHld5TQi..wfC';
+const JSONBIN_BIN = '69c10e97c3097a1dd54f3efb';
+const JSONBIN_URL = `https://api.jsonbin.io/v3/b/${JSONBIN_BIN}`;
 
-function logUsage(req) {
+// ── JSONBIN LOGGING ──
+async function readLogs() {
   try {
-    const messages = req.body.messages || [];
-    const lastUserMsg = messages.filter(m => m.role === 'user').pop();
-    const firstWords = lastUserMsg
-      ? (typeof lastUserMsg.content === 'string'
-          ? lastUserMsg.content.slice(0, 60)
-          : '[multipart]')
-      : '[unknown]';
-
-    const entry = {
-      timestamp: new Date().toISOString(),
-      firstWords,
-      messageCount: messages.length,
-      model: req.body.model || 'unknown',
-      ip: (req.headers['x-forwarded-for'] || req.ip || '').slice(0, 8) + '***'
-    };
-    usageLog.push(entry);
-    console.log('[USAGE]', JSON.stringify(entry));
+    const res = await fetch(JSONBIN_URL + '/latest', {
+      headers: { 'X-Master-Key': JSONBIN_KEY }
+    });
+    const data = await res.json();
+    return data.record.logs || [];
   } catch (e) {
-    console.error('Log error:', e.message);
+    console.error('JSONbin read error:', e.message);
+    return [];
   }
 }
 
-// ── STATS ENDPOINT ──
-app.get('/stats', (req, res) => {
-  const today = new Date().toISOString().slice(0, 10);
-  const todayCount = usageLog.filter(e => e.timestamp.startsWith(today)).length;
-  const avgMessages = usageLog.length
-    ? Math.round(usageLog.reduce((sum, e) => sum + e.messageCount, 0) / usageLog.length)
-    : 0;
+async function writeLog(entry) {
+  try {
+    const logs = await readLogs();
+    logs.push(entry);
+    // Keep last 500 entries
+    const trimmed = logs.slice(-500);
+    await fetch(JSONBIN_URL, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Master-Key': JSONBIN_KEY
+      },
+      body: JSON.stringify({ logs: trimmed })
+    });
+  } catch (e) {
+    console.error('JSONbin write error:', e.message);
+  }
+}
 
+function buildEntry(req) {
+  const messages = req.body.messages || [];
+  const lastUserMsg = messages.filter(m => m.role === 'user').pop();
+  const firstWords = lastUserMsg
+    ? (typeof lastUserMsg.content === 'string'
+        ? lastUserMsg.content.slice(0, 80)
+        : '[multipart]')
+    : '[unknown]';
+  return {
+    timestamp: new Date().toISOString(),
+    firstWords,
+    messageCount: messages.length,
+    model: req.body.model || 'unknown',
+    ip: (req.headers['x-forwarded-for'] || req.ip || '').slice(0, 8) + '***'
+  };
+}
+
+// ── STATS ENDPOINT ──
+app.get('/stats', async (req, res) => {
+  const logs = await readLogs();
+  const today = new Date().toISOString().slice(0, 10);
+  const todayLogs = logs.filter(e => e.timestamp.startsWith(today));
+  const avg = logs.length
+    ? Math.round(logs.reduce((s, e) => s + (e.messageCount || 1), 0) / logs.length)
+    : 0;
   res.json({
-    total_requests: usageLog.length,
-    today: todayCount,
-    avg_messages_per_session: avgMessages,
-    last_10: usageLog.slice(-10)
+    total_requests: logs.length,
+    today: todayLogs.length,
+    avg_messages_per_session: avg,
+    last_10: logs.slice(-10)
   });
 });
 
 app.post('/chat', async (req, res) => {
-  // ── LOG THIS REQUEST ──
-  logUsage(req);
+  // Log async — don't wait so it doesn't slow down the response
+  writeLog(buildEntry(req)).catch(() => {});
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
